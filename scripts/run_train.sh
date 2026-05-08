@@ -151,3 +151,38 @@ python3 -m torch.distributed.run \
     --no_split $NO_SPLIT \
     --case_probs $CASE_PROBS \
     --acc_threshold $ACC_THRESHOLD
+
+TRAIN_EXIT=$?
+echo "=== Training exit code: $TRAIN_EXIT ==="
+
+# Auto-generate summary on rank 0 of the master node, regardless of train exit code
+# (a partial summary on a crashed run is more useful than no summary).
+if [ "${RANK:-0}" = "0" ]; then
+    SUMMARY_OSS_DIR=${PRIMUS_OUTPUT_DIR:-/primus_oss/output}
+    SUMMARY_RUN_NAME="$(basename "$OUTPUT_DIR")_$(date +%Y%m%d_%H%M%S)"
+    SUMMARY_LOCAL_DIR="/root/output/training_summary_${SUMMARY_RUN_NAME}"
+
+    mkdir -p "$SUMMARY_OSS_DIR"
+
+    echo "=== Generating training summary -> $SUMMARY_LOCAL_DIR ==="
+    python3 "$REPO_ROOT/scripts/summarize_training.py" \
+        "$OUTPUT_DIR" \
+        --logging-dir "$LOGGING_DIR" \
+        --out "$SUMMARY_LOCAL_DIR" \
+        || echo "[warn] summarize_training.py failed (continuing)"
+
+    if [ -d "$SUMMARY_LOCAL_DIR" ]; then
+        ZIP_NAME="training_summary_${SUMMARY_RUN_NAME}.zip"
+        (cd "$(dirname "$SUMMARY_LOCAL_DIR")" && zip -rq "$ZIP_NAME" "$(basename "$SUMMARY_LOCAL_DIR")")
+        cp "$(dirname "$SUMMARY_LOCAL_DIR")/$ZIP_NAME" "$SUMMARY_OSS_DIR/$ZIP_NAME" \
+            && echo "=== Summary archived to $SUMMARY_OSS_DIR/$ZIP_NAME ==="
+        # Also copy the markdown alone for quick browsing on OSS
+        if [ -f "$SUMMARY_LOCAL_DIR/summary.md" ]; then
+            cp "$SUMMARY_LOCAL_DIR/summary.md" "$SUMMARY_OSS_DIR/summary_${SUMMARY_RUN_NAME}.md"
+        fi
+    else
+        echo "[warn] Summary dir not produced; skipping archive."
+    fi
+fi
+
+exit $TRAIN_EXIT

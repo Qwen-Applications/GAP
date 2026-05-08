@@ -157,29 +157,74 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
 
         self.post_init()
 
+    # --- Cross-version compatibility shims ---
+    # transformers 4.52 nested visual/language_model under self.model and moved
+    # get_rope_index / rope_deltas there too. 4.49 keeps visual at top level,
+    # treats self.model as the LM, and exposes get_rope_index on self.
+    def _qwen_visual(self):
+        if hasattr(self.model, "visual"):
+            return self.model.visual
+        return self.visual
+
+    def _qwen_language_model(self):
+        if hasattr(self.model, "language_model"):
+            return self.model.language_model
+        return self.model
+
+    def _qwen_get_rope_index(self, *args, **kwargs):
+        if hasattr(self.model, "get_rope_index"):
+            return self.model.get_rope_index(*args, **kwargs)
+        return super().get_rope_index(*args, **kwargs)
+
+    def _qwen_clear_rope_deltas(self):
+        if hasattr(self.model, "rope_deltas"):
+            self.model.rope_deltas = None
+        if hasattr(self, "rope_deltas") and not isinstance(getattr(type(self), "rope_deltas", None), property):
+            try:
+                self.rope_deltas = None
+            except Exception:
+                pass
+
+    def _qwen_filter_model_kwargs(self, **kwargs):
+        """Drop kwargs not accepted by self.model.forward (vision-related kwargs were
+        added to Qwen2_5_VLModel.forward in transformers 4.52; on 4.49 they belong to
+        the wrapper class instead and must not be forwarded to the LM)."""
+        if not hasattr(self, "_qwen_supported_model_kwargs"):
+            import inspect
+            try:
+                params = inspect.signature(self.model.forward).parameters
+                has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                self._qwen_supported_model_kwargs = None if has_var_kw else set(params.keys())
+            except (TypeError, ValueError):
+                self._qwen_supported_model_kwargs = None
+        supported = self._qwen_supported_model_kwargs
+        if supported is None:
+            return kwargs
+        return {k: v for k, v in kwargs.items() if k in supported}
+
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
-    
+
     def set_input_embeddings(self, value):
         self.model.set_input_embeddings(value)
-    
+
     def get_image_features(self, pixel_values, images_crop, images_spatial_crop):
         return self.model.get_image_features(pixel_values, images_crop, images_spatial_crop)
-    
+
     def freeze_vision_model(self, freeze_llm=True, freeze_lm_head=True, freeze_embed=True):
-        for param in self.model.visual.parameters():
+        for param in self._qwen_visual().parameters():
             param.requires_grad = False
 
-        for param in self.model.language_model.parameters():
+        for param in self._qwen_language_model().parameters():
             param.requires_grad = not freeze_llm
-        
-        self.model.language_model.embed_tokens.weight.requires_grad = not freeze_embed
+
+        self._qwen_language_model().embed_tokens.weight.requires_grad = not freeze_embed
         self.lm_head.weight.requires_grad = not freeze_lm_head
 
         print(f"[Info] Vision model is frozen.")
 
     def extract_vision_gt(self, pixel_values, grid_thw):
-        vision_features = self.model.visual(pixel_values, grid_thw=grid_thw)
+        vision_features = self._qwen_visual()(pixel_values, grid_thw=grid_thw)
         batch_size = grid_thw.shape[0]
         targets = []
         pos = 0
@@ -613,15 +658,13 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
                         target_grid = torch.tensor([1, self.target_h, self.target_w], dtype=torch.long, device=device)
                         merged_grid_thw[is_gen] = target_grid
                         
-                    if hasattr(self.model, "get_rope_index"):
-                        position_ids, rope_deltas = self.model.get_rope_index(
-                            input_ids=rope_input_ids,
-                            image_grid_thw=merged_grid_thw,
-                            video_grid_thw=None,
-                            attention_mask=attention_mask
-                        )
-                        if hasattr(self.model, "rope_deltas"):
-                            self.model.rope_deltas = None
+                    position_ids, rope_deltas = self._qwen_get_rope_index(
+                        input_ids=rope_input_ids,
+                        image_grid_thw=merged_grid_thw,
+                        video_grid_thw=None,
+                        attention_mask=attention_mask
+                    )
+                    self._qwen_clear_rope_deltas()
 
         raw_token_embeds = None
         query_text_embeds = None
@@ -655,7 +698,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
 
         if pixel_values is not None and image_grid_thw is not None:
             with torch.no_grad():
-                image_embeds = self.model.visual(
+                image_embeds = self._qwen_visual()(
                     pixel_values, grid_thw=image_grid_thw
                 )
 
@@ -691,7 +734,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
         pixel_values = None
         pixel_values_videos = None
 
-        outputs = self.model(
+        outputs = self.model(**self._qwen_filter_model_kwargs(
             input_ids=None,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -708,7 +751,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
             video_grid_thw=video_grid_thw,
             rope_deltas=rope_deltas,
             second_per_grid_ts=second_per_grid_ts,
-        )
+        ))
 
         hidden_states = outputs[0]
         # save query text embeddings and image embeddings 
@@ -784,7 +827,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            rope_deltas=outputs.rope_deltas,
+            rope_deltas=getattr(outputs, "rope_deltas", rope_deltas),
             lm_loss=lm_loss.detach() if lm_loss is not None else None,
             vision_loss=vision_loss.detach() if vision_loss is not None else None,
         )
@@ -1382,7 +1425,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
         query_vision_norm = None
         if add_noise and pixel_values is not None and image_grid_thw is not None:
             with torch.no_grad():
-                query_image_embeds = self.model.visual(
+                query_image_embeds = self._qwen_visual()(
                     pixel_values, grid_thw=image_grid_thw
                 )
             if query_image_embeds.numel() > 0:
@@ -1871,13 +1914,13 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
                 ).repeat(batch_size, 1)
                 model_inputs["image_grid_thw"] = current_grid
 
-            vision_positions, rope_deltas = self.model.get_rope_index(
+            vision_positions, rope_deltas = self._qwen_get_rope_index(
                 rope_input_ids,
                 image_grid_thw=current_grid,
                 second_per_grid_ts=second_per_grid_ts,
                 attention_mask=rope_attention_mask,
             )
-            
+
             target_len = model_inputs["position_ids"].shape[-1]
             if vision_positions.shape[-1] != target_len:
                 vision_positions = vision_positions[..., -target_len:]
@@ -1887,8 +1930,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
                 self._rope_deltas_cache = rope_deltas.cpu().tolist()
             except Exception:
                 self._rope_deltas_cache = None
-            if hasattr(self.model, "rope_deltas"):
-                self.model.rope_deltas = None
+            self._qwen_clear_rope_deltas()
 
             if model_inputs["position_ids"].dim() == 3:
                 text_positions = model_inputs["position_ids"][0:1] # [1, B, Seq]

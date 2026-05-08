@@ -15,7 +15,20 @@ from transformers import (
     TrainingArguments,
     set_seed,
     HfArgumentParser,
+    GenerationConfig,
 )
+
+# transformers 4.49.0 keeps torch.dtype objects in GenerationConfig.to_dict(),
+# which breaks the logger.info(repr(self)) call inside from_dict(). Stringify
+# any dtype values so json.dumps can serialize them.
+_orig_generation_config_to_dict = GenerationConfig.to_dict
+def _generation_config_to_dict(self):
+    d = _orig_generation_config_to_dict(self)
+    for k, v in list(d.items()):
+        if isinstance(v, torch.dtype):
+            d[k] = str(v).replace("torch.", "")
+    return d
+GenerationConfig.to_dict = _generation_config_to_dict
 
 from gap import GapForConditionalGeneration, GapConfig
 from data.data_utils import InterleaveDataset, InterleaveDataCollator
@@ -221,7 +234,7 @@ class GapTrainer(Trainer):
         if target_pixel_values is not None and target_image_grid_thw is not None:
             base_model = model.module if hasattr(model, "module") else model
             with torch.no_grad():
-                vision_features = base_model.model.visual(
+                vision_features = base_model._qwen_visual()(
                     target_pixel_values, grid_thw=target_image_grid_thw
                 )
 

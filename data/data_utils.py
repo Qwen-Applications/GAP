@@ -313,6 +313,13 @@ class InterleaveDataset(Dataset):
 
     def _process_image(self, image_path, is_target=False):
         image = self._load_image(image_path)
+        MIN_EDGE = 28
+        w, h = image.size
+        if w < MIN_EDGE or h < MIN_EDGE:
+            scale = MIN_EDGE / min(w, h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            image = image.resize((new_w, new_h), resample=Image.BICUBIC)
         
         if is_target:
             limit_size = int((self.latent_seq_len ** 0.5) * 28)
