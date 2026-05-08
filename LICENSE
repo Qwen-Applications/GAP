@@ -1,0 +1,11 @@
+Review-only license for anonymized NeurIPS submission
+
+This source code is provided solely for confidential peer review of the
+associated anonymized NeurIPS submission. It may be used by reviewers and
+area chairs to inspect, execute, and evaluate the submitted method during
+the review process.
+
+Redistribution, public posting, or use outside the review process is not
+granted by this review-only package. If the paper is accepted, the authors
+intend to release a de-anonymized public version with final licensing and
+citation metadata.

@@ -1,0 +1,24 @@
+# Pinned for Qwen2.5-VL-7B compatibility. Transformers >=4.50 is known to cause
+# generation repeats on this checkpoint; 4.49.0 is the sweet spot. Torch 2.7.0
+# is the first PyTorch release with cu128 wheels, matching CUDA 12.8 hosts.
+torch==2.7.0
+torchvision==0.22.0
+transformers==4.49.0
+accelerate>=1.3.0,<1.5.0
+deepspeed>=0.15.0,<0.17.0
+trl>=0.12.0,<0.15.0
+qwen_vl_utils>=0.0.8
+pillow>=10.0
+numpy>=1.26,<2.0
+tqdm>=4.66
+requests>=2.31
+datasets>=2.20
+huggingface-hub>=0.24
+scikit-learn>=1.4
+matplotlib>=3.8
+openai>=1.0
+mistral_common
+
+# Optional: only needed for OpenAI-compatible local inference scripts.
+# vLLM has its own torch pin, install in a separate env if you need it.
+# vllm>=0.7.0
