@@ -198,8 +198,8 @@ class GapTrainer(Trainer):
         self.eval_metrics_buffer = {
             "lm_loss_sum": 0.0,
             "lm_loss_count": 0,
-            "vis_loss_sum": 0.0,
-            "vis_loss_count": 0,
+            "latent_loss_sum": 0.0,
+            "latent_loss_count": 0,
         }
 
     def _get_schedule_sampling_ratio(self):
@@ -307,21 +307,29 @@ class GapTrainer(Trainer):
 
 
         packed_vision_features = vision_labels[vision_mask.bool()] if vision_labels is not None else None
-        need_vision_loss = not self.args.no_latent_loss
+        need_latent_loss = not self.args.no_latent_loss
         schedule_sampling_ratio = self._get_schedule_sampling_ratio()
 
         outputs = model(
             **inputs,
-            vision_labels=vision_labels if need_vision_loss else None,
+            vision_labels=vision_labels if need_latent_loss else None,
             vision_mask=vision_mask,
             target_image_seq_lens=target_image_seq_lens_tensor,
             target_image_counts=target_image_counts_tensor,
             vision_features=packed_vision_features,
-            scheduled_sampling_enabled=self.args.schedule_sampling_enabled and need_vision_loss,
+            scheduled_sampling_enabled=self.args.schedule_sampling_enabled and need_latent_loss,
             scheduled_sampling_ratio=schedule_sampling_ratio,
         )
         
         loss = outputs.loss
+
+        # transformers >=4.46 passes num_items_in_batch (count of unmasked tokens
+        # in the global batch). Trainer expects compute_loss to return a sum-form
+        # loss in this case; F.cross_entropy returns a per-token mean. Multiply
+        # by num_items_in_batch so Trainer's downstream division produces the
+        # correct per-token mean in the displayed `loss`.
+        if num_items_in_batch is not None:
+            loss = loss * num_items_in_batch
 
         self._micro_step += 1
         is_last_microbatch = self._micro_step % self.args.gradient_accumulation_steps == 0
@@ -329,10 +337,10 @@ class GapTrainer(Trainer):
             custom_logs = {}
             if hasattr(outputs, "lm_loss") and outputs.lm_loss is not None:
                 custom_logs["lm_loss"] = outputs.lm_loss.item()
-            if hasattr(outputs, "vision_loss") and outputs.vision_loss is not None:
-                v_loss = outputs.vision_loss
+            if hasattr(outputs, "latent_loss") and outputs.latent_loss is not None:
+                v_loss = outputs.latent_loss
                 if v_loss is not None:
-                    custom_logs["vision_loss"] = v_loss.item()
+                    custom_logs["latent_loss"] = v_loss.item()
             if self.args.schedule_sampling_enabled:
                 custom_logs["schedule_sampling_ratio"] = schedule_sampling_ratio
             if len(custom_logs) > 0:
@@ -350,14 +358,14 @@ class GapTrainer(Trainer):
         if global_metrics["lm_loss_count"] > 0:
             output[f"{metric_key_prefix}_lm_loss"] = global_metrics["lm_loss_sum"] / global_metrics["lm_loss_count"]
 
-        if global_metrics["vis_loss_count"] > 0:
-            output[f"{metric_key_prefix}_vision_loss"] = global_metrics["vis_loss_sum"] / global_metrics["vis_loss_count"]
+        if global_metrics["latent_loss_count"] > 0:
+            output[f"{metric_key_prefix}_latent_loss"] = global_metrics["latent_loss_sum"] / global_metrics["latent_loss_count"]
 
         if self.is_world_process_zero():
             print(f"\n[Eval Metrics] "
                   f"Loss: {output.get(f'{metric_key_prefix}_loss', 'N/A'):.4f} | "
                   f"LM: {output.get(f'{metric_key_prefix}_lm_loss', 0.0):.4f} | "
-                  f"Vis: {output.get(f'{metric_key_prefix}_vision_loss', 0.0):.4f}\n")
+                  f"Latent: {output.get(f'{metric_key_prefix}_latent_loss', 0.0):.4f}\n")
             
         return output
 
@@ -369,8 +377,8 @@ class GapTrainer(Trainer):
         metrics_tensor = torch.tensor([
             self.eval_metrics_buffer["lm_loss_sum"],
             self.eval_metrics_buffer["lm_loss_count"],
-            self.eval_metrics_buffer["vis_loss_sum"],
-            self.eval_metrics_buffer["vis_loss_count"],
+            self.eval_metrics_buffer["latent_loss_sum"],
+            self.eval_metrics_buffer["latent_loss_count"],
         ], dtype=torch.float64, device=device)
 
         dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
@@ -378,8 +386,8 @@ class GapTrainer(Trainer):
         return {
             "lm_loss_sum": metrics_tensor[0].item(),
             "lm_loss_count": metrics_tensor[1].item(),
-            "vis_loss_sum": metrics_tensor[2].item(),
-            "vis_loss_count": metrics_tensor[3].item(),
+            "latent_loss_sum": metrics_tensor[2].item(),
+            "latent_loss_count": metrics_tensor[3].item(),
         }
     
     def prediction_step(
@@ -402,10 +410,10 @@ class GapTrainer(Trainer):
                     self.eval_metrics_buffer["lm_loss_sum"] += outputs.lm_loss.mean().item() * batch_size
                     self.eval_metrics_buffer["lm_loss_count"] += batch_size
                 
-                # Accumulate local vision loss.
-                if hasattr(outputs, "vision_loss") and outputs.vision_loss is not None:
-                    self.eval_metrics_buffer["vis_loss_sum"] += outputs.vision_loss.mean().item() * batch_size
-                    self.eval_metrics_buffer["vis_loss_count"] += batch_size
+                # Accumulate local latent loss.
+                if hasattr(outputs, "latent_loss") and outputs.latent_loss is not None:
+                    self.eval_metrics_buffer["latent_loss_sum"] += outputs.latent_loss.mean().item() * batch_size
+                    self.eval_metrics_buffer["latent_loss_count"] += batch_size
 
         if prediction_loss_only:
             return (loss, None, None)

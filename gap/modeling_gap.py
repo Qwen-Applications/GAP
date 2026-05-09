@@ -33,7 +33,7 @@ class GapCausalLMOutputWithPast(ModelOutput):
     rope_deltas: Optional[torch.LongTensor] = None
     # record loss
     lm_loss: Optional[torch.FloatTensor] = None
-    vision_loss: Optional[torch.FloatTensor] = None
+    latent_loss: Optional[torch.FloatTensor] = None
 
 def sinkhorn_loss(pred, target, epsilon=0.2, num_iters=5):
     pred = pred.float()
@@ -403,8 +403,8 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
         return target_per_sample
             
 
-    def _compute_vision_loss_from_segments(self, pred_per_sample, target_per_sample, device):
-        vision_loss_terms = []
+    def _compute_latent_loss_from_segments(self, pred_per_sample, target_per_sample, device):
+        latent_loss_terms = []
 
         for b, (pred_imgs, tgt_imgs) in enumerate(zip(pred_per_sample, target_per_sample)):
             if len(pred_imgs) == 0 or len(tgt_imgs) == 0:
@@ -425,10 +425,10 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
                 recon_pred = self._decode_vision_latent_with_pca(
                     projected_pred.view(-1, projected_pred.shape[-1])
                 )
-                vision_loss_terms.append(F.mse_loss(recon_pred, target))
+                latent_loss_terms.append(F.mse_loss(recon_pred, target))
 
-        if len(vision_loss_terms) > 0:
-            return torch.stack(vision_loss_terms).mean()
+        if len(latent_loss_terms) > 0:
+            return torch.stack(latent_loss_terms).mean()
         return torch.tensor(0.0, device=device)
 
     def _flatten_vision_segments(self, segments, reference_tensor: torch.Tensor):
@@ -806,7 +806,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
-        lm_loss, vision_loss = None, None
+        lm_loss, latent_loss = None, None
 
         if labels is not None:
             shift_logits = logits[:, :-1, :].contiguous()
@@ -828,18 +828,19 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
                 target_image_counts=target_image_counts,
                 pred_per_sample=pred_per_sample,
             )
-            vision_loss = self._compute_vision_loss_from_segments(
+            latent_loss = self._compute_latent_loss_from_segments(
                 pred_per_sample=pred_per_sample,
                 target_per_sample=target_per_sample,
                 device=hidden_states.device,
             )
 
-            # Total loss
-            vision_loss_weight = getattr(self.config, "vision_loss_weight", 1.0)
+            # Total loss. Config field is named `vision_loss_weight` for backward
+            # compat with existing checkpoints (it is the latent-loss weight).
+            latent_loss_weight = getattr(self.config, "vision_loss_weight", 1.0)
             if loss is None:
-                loss = vision_loss_weight * vision_loss
+                loss = latent_loss_weight * latent_loss
             else:
-                loss = loss + vision_loss_weight * vision_loss
+                loss = loss + latent_loss_weight * latent_loss
 
         # Ensure vision_latent_head always participates in the backward pass
         # so DDP allreduce doesn't hang when some ranks have no vision loss.
@@ -861,7 +862,7 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
             # Fall back to the value computed earlier in this forward, or None.
             rope_deltas=getattr(outputs, "rope_deltas", rope_deltas),
             lm_loss=lm_loss.detach() if lm_loss is not None else None,
-            vision_loss=vision_loss.detach() if vision_loss is not None else None,
+            latent_loss=latent_loss.detach() if latent_loss is not None else None,
         )
     
     def _save_tensors_dict(self, tensors_dict, dir_path, file_name):
