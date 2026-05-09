@@ -202,6 +202,36 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
             return kwargs
         return {k: v for k, v in kwargs.items() if k in supported}
 
+    def _qwen_rope_axis_count(self):
+        """Number of axes the rotary_emb expects in position_ids[0].
+        4.49 hardcodes 3 (T,H,W); 4.52+ may use 4. Detect by reading the
+        rotary_emb.forward source for the .expand(N, ...) factor."""
+        if hasattr(self, "_qwen_rope_axes_cached"):
+            return self._qwen_rope_axes_cached
+        n = None
+        try:
+            import inspect, re
+            rotary = getattr(self.model, "rotary_emb", None)
+            if rotary is None and hasattr(self.model, "layers") and len(self.model.layers) > 0:
+                rotary = getattr(self.model.layers[0].self_attn, "rotary_emb", None)
+            if rotary is not None:
+                src = inspect.getsource(rotary.forward)
+                m = re.search(r"\.expand\(\s*(\d+)\s*,", src)
+                if m:
+                    n = int(m.group(1))
+        except Exception:
+            n = None
+        if n is None:
+            # Fall back to checking transformers version.
+            import transformers
+            try:
+                major, minor = (int(x) for x in transformers.__version__.split(".")[:2])
+                n = 3 if (major, minor) < (4, 52) else 4
+            except Exception:
+                n = 4
+        self._qwen_rope_axes_cached = n
+        return n
+
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
 
@@ -827,6 +857,8 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            # rope_deltas is a 4.52+ output field; absent on 4.49 (plain BaseModelOutputWithPast).
+            # Fall back to the value computed earlier in this forward, or None.
             rope_deltas=getattr(outputs, "rope_deltas", rope_deltas),
             lm_loss=lm_loss.detach() if lm_loss is not None else None,
             vision_loss=vision_loss.detach() if vision_loss is not None else None,
@@ -1932,11 +1964,18 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
                 self._rope_deltas_cache = None
             self._qwen_clear_rope_deltas()
 
-            if model_inputs["position_ids"].dim() == 3:
-                text_positions = model_inputs["position_ids"][0:1] # [1, B, Seq]
+            if self._qwen_rope_axis_count() <= 3:
+                # 4.49 rotary_emb hardcodes expand(3, ...). vision_positions from
+                # get_rope_index already encodes T/H/W correctly across text and
+                # image regions; no extra text axis required. Slice in case
+                # get_rope_index returned >3 axes.
+                model_inputs["position_ids"] = vision_positions[:3]
             else:
-                text_positions = model_inputs["position_ids"].unsqueeze(0)
-            model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
+                if model_inputs["position_ids"].dim() == 3:
+                    text_positions = model_inputs["position_ids"][0:1] # [1, B, Seq]
+                else:
+                    text_positions = model_inputs["position_ids"].unsqueeze(0)
+                model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
 
         else:
             source_ids = model_inputs.get("input_ids", input_ids)
@@ -1963,12 +2002,15 @@ class GapForConditionalGeneration(Qwen2_5_VLForConditionalGeneration, Generation
 
             vision_positions = current_pos.unsqueeze(0).expand(3, -1, -1) + delta
             vision_positions = vision_positions.to(dtype=model_inputs["position_ids"].dtype)
-            
-            if model_inputs["position_ids"].dim() == 3:
-                text_positions = model_inputs["position_ids"][0:1]
+
+            if self._qwen_rope_axis_count() <= 3:
+                model_inputs["position_ids"] = vision_positions[:3]
             else:
-                text_positions = model_inputs["position_ids"].unsqueeze(0)
-            model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
+                if model_inputs["position_ids"].dim() == 3:
+                    text_positions = model_inputs["position_ids"][0:1]
+                else:
+                    text_positions = model_inputs["position_ids"].unsqueeze(0)
+                model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
 
         if (not is_first_iteration and use_cache):
             model_inputs["pixel_values"] = None
