@@ -11,14 +11,12 @@ The implementation builds on Qwen2.5-VL and trains a visual latent reasoning pat
 
 This repository is GAP-only. Deprecated method variants have been removed.
 
-This anonymized package is prepared as NeurIPS supplementary material. It is
-intended to document the model, data format, and reproduction entry points;
-large checkpoints and datasets are not bundled.
+Large checkpoints and datasets are not bundled.
 
 ## Repository Layout
 
 ```text
-modeling/gap/                 GAP model and config
+gap/                          GAP model and config
 training/train.py             Main GAP training entry point
 data/data_utils.py            Interleaved text/image/latent dataset and collator
 analyze/export_vit_pca.py     PCA export for auxiliary-image vision embeddings
@@ -27,7 +25,6 @@ scripts/debug_stage1_train.sh Small debug launcher for the same GAP training pat
 scripts/run_export_vit_pca.sh PCA export launcher
 deepspeed/                    DeepSpeed configs
 tests/                        Lightweight data/collator diagnostics
-SUPPLEMENTARY.md              Review/package notes
 ```
 
 ## Setup
@@ -47,7 +44,7 @@ export MODEL_PATH=/root/model/Qwen2.5-VL-7B-Instruct
 The package exposes the model as:
 
 ```python
-from modeling.gap import GapConfig, GapForConditionalGeneration
+from gap import GapConfig, GapForConditionalGeneration
 ```
 
 New GAP checkpoints use:
@@ -189,7 +186,7 @@ python tests/check_data_collator.py
 Run syntax and import checks:
 
 ```bash
-python -c "from modeling.gap import GapConfig, GapForConditionalGeneration; print(GapConfig.model_type)"
+python -c "from gap import GapConfig, GapForConditionalGeneration; print(GapConfig.model_type)"
 python -c "from data.data_utils import InterleaveDataset, InterleaveDataCollator; print('ok')"
 ```
 
@@ -209,4 +206,3 @@ python -m scripts.stats_resolution \
 - The default code path is the GAP paper path: PCA-aligned latent head, 36 latent tokens, and difficulty-aware target removal.
 - Auxiliary target images are used only for latent supervision during training. They are not query inputs.
 - Deprecated checkpoints from earlier method variants are not supported by this cleaned codebase.
-- The NeurIPS review archive should exclude `.git/`, local editor settings, caches, compiled Python files, generated outputs, and checkpoints. See `SUPPLEMENTARY.md`.
