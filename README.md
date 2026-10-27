@@ -53,6 +53,48 @@ New GAP checkpoints use:
 - architecture: `GapForConditionalGeneration`
 - example checkpoint path: `/root/model/Gap-VL-7B`
 
+## Data
+
+The training data used in the paper is released on Hugging Face as [AlibabaQwenintern/gap-data](https://huggingface.co/datasets/AlibabaQwenintern/gap-data). It contains 36,985 examples (33,279 in `train.jsonl`, 3,706 in `val.jsonl`), the image archives, and the PCA basis used in the paper. See the [dataset card](https://huggingface.co/datasets/AlibabaQwenintern/gap-data) for sources, construction, field descriptions, and licenses.
+
+Access is gated: log in to Hugging Face and accept the conditions on the dataset page, then download and extract:
+
+```bash
+hf auth login
+hf download AlibabaQwenintern/gap-data --repo-type dataset --local-dir /root/data
+cd /root/data
+for f in images/*.tar; do tar -xf "$f" -C /root/data; done
+```
+
+With older versions of `huggingface_hub`, run `huggingface-cli download` with the same arguments. The archives take about 50 GB, and extraction needs roughly the same again; you can delete `images/*.tar` afterwards.
+
+After extraction, `/root/data` matches the launcher defaults:
+
+```text
+/root/data/
+├── train.jsonl        # TRAIN_DATA_PATH, TRAIN_META_FILEPATHS
+├── val.jsonl          # VAL_DATA_PATH
+├── vit_pca_mu.npy     # VISION_PCA_MU_PATH
+├── vit_pca_W.npy      # VISION_PCA_W_PATH
+├── monet/
+├── chart/
+├── GEOQA/
+├── MM_MATH/
+├── MATHVISION/
+└── geo3k_train/
+```
+
+Image paths in the JSONL files are either absolute (`/root/data/...`) or relative to `/root/data`, which is the image root for every `data_source` in the default `IMAGE_ROOTS` of `scripts/run_train.sh`. To keep the data elsewhere, rewrite the `/root/data/` prefix in the JSONL files and set `IMAGE_ROOTS` to your root.
+
+The released PCA basis (629 components, 95% retained variance) was fit on the training split, so you can train directly without the PCA export step below:
+
+```bash
+export TRAIN_DATA_PATH=/root/data/train.jsonl
+export VAL_DATA_PATH=/root/data/val.jsonl
+export VISION_PCA_MU_PATH=/root/data/vit_pca_mu.npy
+export VISION_PCA_W_PATH=/root/data/vit_pca_W.npy
+```
+
 ## Data Format
 
 Training data is JSONL. Each line should contain `messages` or `message` with role/dialog fields. Images are referenced by `image_filenames`, and `image_types` should distinguish query images from auxiliary target images:
@@ -114,8 +156,8 @@ export MASTER_PORT=29500
 export NPROC_PER_NODE=8
 
 export MODEL_PATH=/root/model/Qwen2.5-VL-7B-Instruct
-export TRAIN_DATA_PATH=/root/data/stage1_subset_train.jsonl
-export VAL_DATA_PATH=/root/data/stage1_subset_val.jsonl
+export TRAIN_DATA_PATH=/root/data/train.jsonl
+export VAL_DATA_PATH=/root/data/val.jsonl
 export PRIMUS_SAVE_CHECKPOINT_DIR=/root/output/gap_stage1_train
 export PRIMUS_TENSORBOARD_LOG_DIR=/root/output/gap_stage1_logs
 
